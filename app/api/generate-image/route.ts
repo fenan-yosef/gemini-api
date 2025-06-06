@@ -92,7 +92,7 @@ export async function POST(req: NextRequest) {
             // Return the full Gemini response, or selected parts, to App Script
             return NextResponse.json({
                 status: 'success',
-                message: 'Image sent to Telegram',
+                message: imageGenResult.response.candidates?.[0]?.content?.parts?.[0]?.text || 'Image generated successfully',
                 prompt: prompt,
                 generatedImage: { // Provide structured info about the image
                     mimeType: mimeType,
