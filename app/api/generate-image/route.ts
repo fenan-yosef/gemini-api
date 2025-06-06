@@ -50,9 +50,13 @@ export async function POST(req: NextRequest) {
                 role: 'user',
                 parts: [{ text: prompt }]
             }],
+            // *** FIX HERE: Add generationConfig back with type assertion ***
             generationConfig: {
-                responseModalities: ["TEXT", "IMAGE"], // Crucial for image output
-            },
+                // The API specifically requests this, so we add it back.
+                // We use `as any` to tell TypeScript to ignore the type check here
+                // because the API's actual requirement differs from the SDK's type definition.
+                responseModalities: ["TEXT", "IMAGE"],
+            } as any, // Type assertion to bypass TypeScript error
         });
 
         const candidates = imageGenResult.response.candidates;
