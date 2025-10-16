@@ -21,7 +21,6 @@ if (!GEMINI_API_KEY) {
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY || '');
 const IMAGE_GENERATION_MODEL = "gemini-2.0-flash-preview-image-generation";
-const MODERATION_MODEL = 'gemini-1.5-flash'; // For text prompt moderation
 
 export async function POST(req: NextRequest) {
     let chatId: number = 0;
@@ -39,124 +38,146 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ error: 'Unauthorized request' }, { status: 401 });
         }
 
-        // --- 1. Text Prompt Moderation (Highly Recommended) ---
-        const moderationModel = genAI.getGenerativeModel({ model: MODERATION_MODEL });
-        const moderationInstruction = "You are a content safety expert. Analyze the following user prompt for any content that could be harmful, sexually explicit, hateful, or promote violence, illegal activities, or self-harm. Respond ONLY with 'SAFE' if the prompt is acceptable, or 'UNSAFE' followed by a brief reason if it is not. Focus on the user's *intent* to generate an image.";
-
-        const moderationResult = await moderationModel.generateContent([moderationInstruction, prompt]);
-        const moderationResponseText = moderationResult.response.text().trim();
-
-        if (moderationResponseText.toUpperCase().startsWith('UNSAFE')) {
-            const reason = moderationResponseText.substring(5).trim() || "Content deemed unsafe.";
-            // --- MODIFIED: Send direct reply to Telegram for unsafe prompts ---
-            // await sendTelegramMessage(chatId, `🚫 Your request was flagged by our safety system: ${reason}`);
-            return NextResponse.json({ status: 'moderated', message: reason, prompt: prompt, moderationFeedback: moderationResult.response.promptFeedback });
-        }
+        // Moderation removed: relying on provider-side moderation (Stability/Gemini) or local checks.
 
 
         // --- 2. Image Generation ---
-        const imageGenModel = genAI.getGenerativeModel({ model: IMAGE_GENERATION_MODEL });
+        // If Stability keys are provided prefer calling Stability's Core endpoint.
+        // Support multiple fallback keys via STABILITY_KEYS (comma-separated) or legacy STABILITY_KEY.
+        const STABILITY_KEYS_RAW = process.env.STABILITY_KEYS ?? process.env.STABILITY_KEY;
+        const STABILITY_KEYS = STABILITY_KEYS_RAW ? STABILITY_KEYS_RAW.split(',').map(k => k.trim()).filter(Boolean) : [];
 
-        const imageGenResult = await imageGenModel.generateContent({
-            contents: [{
-                role: 'user',
-                parts: [{ text: prompt }]
-            }],
-            generationConfig: {
-                responseModalities: ["TEXT", "IMAGE"],
-            } as any, // Type assertion to bypass TypeScript error
-        });
+        async function generateWithStability(promptText: string, apiKey: string) {
+            const url = 'https://api.stability.ai/v2beta/stable-image/generate/core';
+            const form = new FormData();
+            form.append('prompt', promptText);
+            // Request JSON so we receive a base64 payload we can decode server-side
+            form.append('output_format', 'png');
 
-        const candidates = imageGenResult.response.candidates;
-        if (!candidates || candidates.length === 0) {
-            // --- MODIFIED: Send direct reply to Telegram if no candidates found ---
-            // await sendTelegramMessage(chatId, "❌ Failed to generate image: No candidates found.");
-            console.error("Gemini Image Gen Error: No candidates found.", imageGenResult.response.promptFeedback);
-            return NextResponse.json({
-                status: 'error',
-                message: 'No image candidates found',
-                prompt: prompt,
-                geminiResponse: imageGenResult.response
-            }, { status: 500 });
-        }
-
-        const imagePart = candidates[0].content.parts.find(p => p.inlineData && p.inlineData.mimeType.startsWith('image/'));
-        const textPart = candidates[0].content.parts.find(p => p.text);
-
-        if (imagePart && imagePart.inlineData) {
-            const imageData = imagePart.inlineData.data; // This is your base64 string
-            const mimeType = imagePart.inlineData.mimeType;
-            let caption = prompt;
-
-            if (textPart) {
-                caption = textPart.text;
-            }
-
-            // --- NEW: Upload Image to Cloudinary ---
-            let imageUrl: string | null = null;
-            try {
-                // Cloudinary expects data as "data:image/jpeg;base64,..."
-                // or just the base64 string. Sending with the prefix is safer.
-                const base64ImageWithPrefix = `data:${mimeType};base64,${imageData}`;
-                const uploadResult = await cloudinary.uploader.upload(base64ImageWithPrefix, {
-                    folder: "gemini-telegram-images", // Optional: organize your uploads in a folder
-                    public_id: `gemini-gen-${Date.now()}`, // Optional: provide a unique public ID
-                });
-                imageUrl = uploadResult.secure_url; // Get the secure HTTPS URL
-                console.log("Image uploaded to Cloudinary:", imageUrl);
-            } catch (cloudinaryError: any) {
-                console.error("Error uploading image to Cloudinary:", cloudinaryError);
-                // --- MODIFIED: Send Telegram message on Cloudinary upload failure ---
-                // await sendTelegramMessage(chatId, "⚠️ Failed to upload image to cloud storage. Please try again.");
-                return NextResponse.json({
-                    status: 'error',
-                    message: 'Failed to upload image to cloud storage',
-                    prompt: prompt,
-                    cloudinaryError: cloudinaryError.message,
-                }, { status: 500 });
-            }
-
-            if (!imageUrl) {
-                // await sendTelegramMessage(chatId, "❌ Image URL not available after upload.");
-                return NextResponse.json({
-                    status: 'error',
-                    message: 'Image URL not available',
-                    prompt: prompt,
-                }, { status: 500 });
-            }
-
-            // --- MODIFIED: Send Image URL to Telegram ---
-            // Call the updated helper function to send the URL, not the raw data
-            // await sendTelegramPhoto(chatId, imageUrl, caption);
-
-
-            // Return the full Gemini response, plus the Cloudinary URL
-            return NextResponse.json({
-                status: 'success',
-                imageUrl: imageUrl,
-                message: caption, // Using the caption here as the primary message
-                prompt: prompt,
-                generatedImage: { // Provide structured info about the image
-                    mimeType: mimeType,
-                    // data: imageData, // Still include raw data in response for debugging/logging (optional, can remove)
-                    caption: caption,
-                    imageUrl: imageUrl, // <--- NEW: Include the Cloudinary URL here!
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${apiKey}`,
+                    Accept: 'application/json'
                 },
-                geminiResponse: { // Include full Gemini response (or specific parts)
-                    candidates: imageGenResult.response.candidates,
-                    promptFeedback: imageGenResult.response.promptFeedback
-                }
+                body: form as any
             });
-        } else {
-            // --- MODIFIED: Send direct reply to Telegram if no image part found ---
-            // await sendTelegramMessage(chatId, "❌ No image was found in the model's response. Try a different prompt.");
+
+            if (!res.ok) {
+                // Try to include response body for debugging
+                let bodyText: string | object = '';
+                try { bodyText = await res.json(); } catch (e) { bodyText = await res.text(); }
+                throw new Error(`Stability API error ${res.status}: ${JSON.stringify(bodyText)}`);
+            }
+
+            // Expecting JSON response containing base64 image data (field 'image')
+            const data = await res.json();
+            // The API sometimes returns different shapes (image / artifacts[].base64 etc.)
+            const base64 = data.image || data.artifacts?.[0]?.base64 || data.artifacts?.[0]?.b64_json || data.artifacts?.[0]?.base64_image;
+            return { base64, raw: data };
+        }
+
+        let imageBase64: string | undefined;
+        let mimeType = 'image/png';
+        let caption = prompt;
+
+        if (STABILITY_KEYS.length > 0) {
+            // Try each key in order until one succeeds
+            for (let i = 0; i < STABILITY_KEYS.length; i++) {
+                const key = STABILITY_KEYS[i];
+                try {
+                    const stabilityResult = await generateWithStability(prompt, key);
+                    imageBase64 = stabilityResult.base64;
+                    // Keep caption default — Stability may not return a text caption
+                    caption = prompt;
+                    // success — stop trying more keys
+                    break;
+                } catch (stErr: any) {
+                    // Log the error without printing the key
+                    console.error(`Stability generation failed using key #${i + 1}:`, stErr.message || stErr);
+                    // try next key
+                    imageBase64 = undefined;
+                }
+            }
+        }
+
+        // If imageBase64 is still undefined, fallback to existing Gemini path
+        if (!imageBase64) {
+            const imageGenModel = genAI.getGenerativeModel({ model: IMAGE_GENERATION_MODEL });
+
+            const imageGenResult = await imageGenModel.generateContent({
+                contents: [{
+                    role: 'user',
+                    parts: [{ text: prompt }]
+                }],
+                generationConfig: {
+                    responseModalities: ["TEXT", "IMAGE"],
+                } as any, // Type assertion to bypass TypeScript error
+            });
+
+            const candidates = imageGenResult.response.candidates;
+            if (!candidates || candidates.length === 0) {
+                console.error("Gemini Image Gen Error: No candidates found.", imageGenResult.response.promptFeedback);
+                return NextResponse.json({
+                    status: 'error',
+                    message: 'No image candidates found',
+                    prompt: prompt,
+                    geminiResponse: imageGenResult.response
+                }, { status: 500 });
+            }
+
+            const imagePart = candidates[0].content.parts.find(p => p.inlineData && p.inlineData.mimeType.startsWith('image/'));
+            const textPart = candidates[0].content.parts.find(p => p.text);
+
+            if (imagePart && imagePart.inlineData) {
+                imageBase64 = imagePart.inlineData.data; // base64
+                mimeType = imagePart.inlineData.mimeType;
+                if (textPart) caption = textPart.text;
+            } else {
+                return NextResponse.json({
+                    status: 'error',
+                    message: 'No image part found in Gemini response',
+                    prompt: prompt,
+                    geminiResponse: imageGenResult.response
+                }, { status: 500 });
+            }
+        }
+
+        if (!imageBase64) {
+            return NextResponse.json({ status: 'error', message: 'Failed to generate image from any provider', prompt }, { status: 500 });
+        }
+
+        // Upload to Cloudinary
+        let imageUrl: string | null = null;
+        try {
+            const base64ImageWithPrefix = `data:${mimeType};base64,${imageBase64}`;
+            const uploadResult = await cloudinary.uploader.upload(base64ImageWithPrefix, {
+                folder: "gemini-telegram-images",
+                public_id: `generated-${Date.now()}`,
+            });
+            imageUrl = uploadResult.secure_url;
+            console.log("Image uploaded to Cloudinary:", imageUrl);
+        } catch (cloudinaryError: any) {
+            console.error("Error uploading image to Cloudinary:", cloudinaryError);
             return NextResponse.json({
                 status: 'error',
-                message: 'No image part found in Gemini response',
+                message: 'Failed to upload image to cloud storage',
                 prompt: prompt,
-                geminiResponse: imageGenResult.response
+                cloudinaryError: cloudinaryError.message,
             }, { status: 500 });
         }
+
+        return NextResponse.json({
+            status: 'success',
+            imageUrl,
+            message: caption,
+            prompt,
+            generatedImage: {
+                mimeType,
+                caption,
+                imageUrl,
+            }
+        });
 
     } catch (error: any) {
         console.error("Backend API Error:", error);
