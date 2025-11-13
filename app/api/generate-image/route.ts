@@ -81,6 +81,42 @@ export async function POST(req: NextRequest) {
         let mimeType = 'image/png';
         let caption = prompt;
 
+        // --- NEW: Try the external worker endpoint first (no auth required) ---
+        // Expected response shape (example):
+        // {
+        //   "message": "Image generated successfully!",
+        //   "prompt_used": "a robot painting a sunset",
+        //   "model_used": "@cf/stabilityai/...",
+        //   "image_base64": "<base64 PNG>",
+        //   "generated_at": "2025-11-13T06:45:45.679Z"
+        // }
+        const EXTERNAL_API_URL = 'https://my-image-gen-api.fenanyosef.workers.dev';
+        try {
+            const extRes = await fetch(EXTERNAL_API_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt })
+            });
+
+            if (extRes.ok) {
+                const extJson = await extRes.json().catch(() => null);
+                if (extJson && (extJson.image_base64 || extJson.image)) {
+                    // Accept either `image_base64` or `image` for flexibility
+                    imageBase64 = extJson.image_base64 || extJson.image;
+                    mimeType = 'image/png';
+                    caption = extJson.prompt_used || extJson.message || prompt;
+                } else {
+                    console.warn('External image API returned no base64 image:', extJson);
+                }
+            } else {
+                let bodyText = '';
+                try { bodyText = await extRes.text(); } catch (e) { bodyText = String(e); }
+                console.warn(`External image API responded ${extRes.status}: ${bodyText}`);
+            }
+        } catch (extErr: any) {
+            console.error('Error calling external image API:', extErr);
+        }
+
         if (STABILITY_KEYS.length > 0) {
             // Try each key in order until one succeeds
             for (let i = 0; i < STABILITY_KEYS.length; i++) {
