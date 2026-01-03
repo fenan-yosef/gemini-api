@@ -11,7 +11,7 @@
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "cloudinary": "^2.6.1",
-    "next": "15.3.3",
+    "next": "15.3.8",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
