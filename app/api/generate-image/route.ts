@@ -20,7 +20,8 @@ if (!GEMINI_API_KEY) {
 }
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY || '');
-const IMAGE_GENERATION_MODEL = "gemini-2.0-flash-preview-image-generation";
+// const IMAGE_GENERATION_MODEL = "gemini-2.0-flash-preview-image-generation";
+const IMAGE_GENERATION_MODEL = "gemini-2.5-flash-image";
 
 export async function POST(req: NextRequest) {
     let chatId: number = 0;
